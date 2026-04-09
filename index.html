@@ -201,7 +201,6 @@
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/2.1.3/jquery.min.js"></script>
 
 <script>
     // ========== SECURE CLIENT-SIDE CODE ==========
@@ -236,33 +235,33 @@
     }
     
     // ========== ADD MESSAGE TO CHAT (With XSS protection) ==========
-    function addMessageToChat(username, message, isPrivate = false) {
-        const sanitizedUsername = sanitizeInput(username);
-        const sanitizedMessage = sanitizeInput(message);
-        
-        const messageDiv = document.createElement('div');
-        messageDiv.className = 'message';
-        
-        if (currentUsername === sanitizedUsername) {
-            messageDiv.classList.add('my-message');
-        }
-        
-        let displayName = sanitizedUsername;
-        if (isPrivate) {
-            displayName = '🔒 ' + sanitizedUsername;
-        }
-        
-        messageDiv.innerHTML = `
-            <div class="message-username">${displayName}</div>
-            <div class="message-text">${sanitizedMessage}</div>
-        `;
-        
-        messagesContent.appendChild(messageDiv);
-        
-        // Scroll to bottom
-        const messagesDiv = document.querySelector('.messages');
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+function addMessageToChat(username, message, isPrivate = false) {
+    const sanitizedUsername = sanitizeInput(username);
+    const sanitizedMessage = sanitizeInput(message);
+
+    const messageDiv = document.createElement('div');
+    messageDiv.className = 'message';
+
+    if (currentUsername === sanitizedUsername) {
+        messageDiv.classList.add('my-message');
     }
+
+    // FIX: Use createElement + textContent instead of innerHTML
+    const usernameDiv = document.createElement('div');
+    usernameDiv.className = 'message-username';
+    usernameDiv.textContent = isPrivate ? '🔒 ' + sanitizedUsername : sanitizedUsername;
+
+    const textDiv = document.createElement('div');
+    textDiv.className = 'message-text';
+    textDiv.textContent = sanitizedMessage; // textContent never executes scripts
+
+    messageDiv.appendChild(usernameDiv);
+    messageDiv.appendChild(textDiv);
+    messagesContent.appendChild(messageDiv);
+
+    const messagesDiv = document.querySelector('.messages');
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
     
     // ========== CONNECT TO SECURE SOCKET ==========
     function connectSocket() {

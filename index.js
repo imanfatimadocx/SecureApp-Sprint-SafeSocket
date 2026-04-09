@@ -5,69 +5,107 @@ const app = express();
 const http = require('http').Server(app);
 const io = require('socket.io')(http);
 const fs = require('fs');
+const crypto = require('crypto');
+const rateLimit = require('express-rate-limit'); // ADD THIS
 
-app.use('/public', express.static('public'))
-
-app.get('/', (req, res) =>  {
-  res.sendFile(__dirname + '/'); 
+// ── RATE LIMITING FIX ──────────────────────────────────────
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100,                  // max 100 requests per IP
+    message: 'Too many requests, please try again later.'
 });
 
+app.use(limiter);  // Apply to all routes
+app.use('/public', express.static('public'));
 
-// usernames which are currently connected to the chat
+app.get('/', (req, res) => {
+    res.sendFile(__dirname + '/index.html');
+});
+
+// ── CSRF TOKEN STORE ───────────────────────────────────────
+const csrfTokens = new Map();
+
+const generateCsrfToken = (socketId) => {
+    const token = crypto.randomBytes(32).toString('hex');
+    csrfTokens.set(socketId, { token, expires: Date.now() + 3600000 });
+    return token;
+};
+
+const verifyCsrfToken = (socketId, token) => {
+    const stored = csrfTokens.get(socketId);
+    if (!stored) return false;
+    if (Date.now() > stored.expires) { csrfTokens.delete(socketId); return false; }
+    return stored.token === token;
+};
+
+// ── SOCKET RATE LIMITING ───────────────────────────────────
+const messageCounts = new Map();
+
+const checkSocketRateLimit = (socketId) => {
+    const now = Date.now();
+    const data = messageCounts.get(socketId) || { count: 0, resetAt: now + 60000 };
+    if (now > data.resetAt) { data.count = 0; data.resetAt = now + 60000; }
+    data.count++;
+    messageCounts.set(socketId, data);
+    return data.count <= 30; // max 30 messages/min
+};
+
+// ── INPUT SANITIZATION ─────────────────────────────────────
+const sanitizeInput = (input) => {
+    if (typeof input !== 'string') return '';
+    return input
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#x27;')
+        .replace(/\//g, '&#x2F;');
+};
+
 let usernames = {};
 
-const check_key = v =>{
-	let val = '';	
-	for(let key in usernames){
-		if(usernames[key] == v)	val = key;
-	}
-	return val;
-}
+io.on('connection', socket => {
+    // Send CSRF token on connect
+    socket.emit('csrf_token', generateCsrfToken(socket.id));
 
-io.on('connection',  socket => {
-	// when the client emits 'sendchat', this listens and executes
-	socket.on('sendchat', data => io.emit('updatechat', socket.username, data));
+    socket.on('sendchat', (data, csrfToken) => {
+        if (!verifyCsrfToken(socket.id, csrfToken)) {
+            socket.emit('error', 'Invalid CSRF token'); return;
+        }
+        if (!checkSocketRateLimit(socket.id)) {
+            socket.emit('error', 'Rate limit exceeded'); return;
+        }
+        io.emit('updatechat', socket.username, sanitizeInput(data));
+    });
 
-	// when the client emits 'adduser', this listens and executes
-	socket.on('adduser', username => {
-		// we store the username in the socket session for this client
-		socket.username = username;
-		// add the client's username to the global list
-		usernames[username] = socket.id;
-		// echo to client they've connected
-		//socket.emit('updatechat', 'Chat Bot', socket.username + ' you have joined the chat');
-		socket.emit('updatechat', 'Chat Bot', `${socket.username} you have joined the chat`);
-		// echo to client their username
-		socket.emit('store_username', username);
-		// echo globally (all clients) that a person has connected
-		//socket.broadcast.emit('updatechat', 'Chat Bot', `${username} has connected`);
-	});
+    socket.on('adduser', (username, csrfToken) => {
+        if (!verifyCsrfToken(socket.id, csrfToken)) {
+            socket.emit('error', 'Invalid CSRF token'); return;
+        }
+        socket.username = sanitizeInput(username);
+        usernames[socket.username] = socket.id;
+        socket.emit('updatechat', 'Chat Bot', `${socket.username} you have joined the chat`);
+        socket.emit('store_username', socket.username);
+    });
 
-	// when the user disconnects.. perform this
-	socket.on('disconnect', () => {
-		// remove the username from global usernames list
-		delete usernames[socket.username];
-		// echo globally that this client has left
-		//socket.broadcast.emit('updatechat', 'Chat Bot', `${socket.username} has left chat`);
-	});
-	
-	// when the user sends a private msg to a user id, first find the username
-	socket.on('check_user', (asker, id) => io.to(usernames[asker]).emit('msg_user_found', check_key(id)));
-	
-	// when the user sends a private message to a user.. perform this
-	socket.on('msg_user', (to_user, from_user, msg) => {
-		//emits 'msg_user_handle', this updates the chat body on client-side
-		io.to(usernames[to_user]).emit('msg_user_handle', from_user, msg);
-		//write the chat message to a txt file		
-		const wstream = fs.createWriteStream('chat_data.txt');		
-		wstream.write(msg);
-		wstream.write('\r\n');
-		wstream.end();
-		
-	});
+    socket.on('msg_user', (to_user, from_user, msg, csrfToken) => {
+        if (!verifyCsrfToken(socket.id, csrfToken)) {
+            socket.emit('error', 'Invalid CSRF token'); return;
+        }
+        if (socket.username !== from_user) {
+            socket.emit('error', 'Unauthorized'); return;
+        }
+        if (!checkSocketRateLimit(socket.id)) {
+            socket.emit('error', 'Rate limit exceeded'); return;
+        }
+        io.to(usernames[to_user]).emit('msg_user_handle', sanitizeInput(from_user), sanitizeInput(msg));
+    });
 
-
+    socket.on('disconnect', () => {
+        delete usernames[socket.username];
+        csrfTokens.delete(socket.id);
+        messageCounts.delete(socket.id);
+    });
 });
 
 http.listen(3000, () => console.log('listening on *:3000'));
-    

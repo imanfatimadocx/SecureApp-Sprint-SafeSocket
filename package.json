@@ -9,6 +9,7 @@
   "author": "Wilbert Muza",
   "dependencies": {
     "express": "^4.16.3",
+    "express-rate-limit": "^8.3.2",
     "socket.io": "^2.5.0"
   },
   "license": "ISC"
